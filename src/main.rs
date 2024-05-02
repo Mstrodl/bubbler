@@ -1,10 +1,11 @@
 use actix_web::{web, App, HttpServer};
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 pub mod routes;
+pub mod scheduler;
 use routes::config::{AppData, ConfigData};
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> std::io::Result<()> {
     let config_data = ConfigData::new();
     let config_data = web::Data::new(AppData {

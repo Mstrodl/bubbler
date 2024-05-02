@@ -1,8 +1,11 @@
+use crate::scheduler::RealtimeGuard;
+use futures::stream::StreamExt;
+use gpio_cdev::{EventRequestFlags, Line, LineRequestFlags};
 use serde::Serialize;
 
 use super::config::{ConfigData, SlotConfig, SlotConfig::*};
-use std::fmt::Debug;
-use std::fs::{self};
+use std::fmt::{self, Debug, Display, Formatter};
+use std::fs;
 use std::thread;
 use std::time::Duration;
 
@@ -72,9 +75,20 @@ pub enum DropState {
     Success,
 }
 
+impl Display for DropError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MotorFailed => write!(f, "Motor didn't actuate"),
+            Self::MotorTimeout => write!(f, "Motor timed out. Is it stuck?"),
+            Self::BadSlot => write!(f, "Bad slot ID"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DropError {
     MotorFailed,
+    MotorTimeout,
     BadSlot,
 }
 
@@ -99,7 +113,21 @@ pub fn run_motor(slot: &SlotConfig, state: bool) -> Result<DropState, DropError>
     }
 }
 
-pub fn drop(config: &ConfigData, slot: usize) -> Result<DropState, DropError> {
+async fn wait_until_line_hits_value(
+    line: &Line,
+    edge: EventRequestFlags,
+    timeout: Duration,
+) -> Result<(), DropError> {
+    let mut event_handle = line
+        .async_events(LineRequestFlags::INPUT, edge, "bub-cam-events")
+        .unwrap();
+    tokio::time::timeout(timeout, event_handle.next())
+        .await
+        .map_err(|_| DropError::MotorTimeout)?;
+    Ok(())
+}
+
+pub async fn drop(config: &ConfigData, slot: usize) -> Result<DropState, DropError> {
     if slot > config.slots.len() || slot == 0 {
         eprintln!("We were asked to drop an invalid slot {}: BadSlot!", slot);
         return Err(DropError::BadSlot);
@@ -112,9 +140,32 @@ pub fn drop(config: &ConfigData, slot: usize) -> Result<DropState, DropError> {
     if let Some(latch) = config.latch.as_ref() {
         latch.open();
     }
+    let _rt = RealtimeGuard::default();
     if let Err(err) = run_motor(slot_config, true) {
         eprintln!("Problem dropping {} ({})! {:?}", slot, slot_config, err);
         result = Err(err);
+    } else if let SlotConfig::GPIO { cam: Some(cam), .. } = slot_config {
+        println!("Waiting for motor to start rotating...",);
+        if let Err(err) = wait_until_line_hits_value(
+            cam,
+            EventRequestFlags::RISING_EDGE,
+            Duration::from_millis(500),
+        )
+        .await
+        {
+            eprintln!("Were we already been spinning? {err:?}");
+        }
+        println!("Waiting for motor to stop rotating...");
+        if let Err(err) = wait_until_line_hits_value(
+            cam,
+            EventRequestFlags::FALLING_EDGE,
+            Duration::from_secs(10),
+        )
+        .await
+        {
+            result = Err(err);
+        }
+        println!("Motor stopped rotating!",);
     } else {
         println!("Sleeping for {}ms after dropping", config.drop_delay);
         thread::sleep(Duration::from_millis(config.drop_delay));

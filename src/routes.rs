@@ -38,7 +38,10 @@ struct DropErrorRes {
 
 #[post("/drop")]
 async fn drop(data: web::Data<AppData>, req_body: web::Json<DropRequest>) -> impl Responder {
-    let drop_result = machine::drop(data.config.lock().unwrap().deref(), req_body.slot);
+    let drop_result = {
+        let config = data.config.lock().await;
+        machine::drop(config.deref(), req_body.slot).await
+    };
     match drop_result {
         Ok(_) => HttpResponse::Ok().json(DropResponse {
             message: "Dropped drink from slot ".to_string() + &req_body.slot.to_string(),
@@ -51,10 +54,10 @@ async fn drop(data: web::Data<AppData>, req_body: web::Json<DropRequest>) -> imp
                     errorCode: 400,
                 })
         }
-        Err(DropError::MotorFailed) => HttpResponse::Ok()
+        Err(err) => HttpResponse::Ok()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .json(DropErrorRes {
-                error: "Motor failed to actuate".to_string(),
+                error: err.to_string(),
                 errorCode: 500,
             }),
     }
@@ -62,7 +65,7 @@ async fn drop(data: web::Data<AppData>, req_body: web::Json<DropRequest>) -> imp
 
 #[get("/health")]
 async fn health(data: web::Data<AppData>) -> impl Responder {
-    let config = data.config.lock().unwrap();
+    let config = data.config.lock().await;
     let slots = machine::get_slots_old(config.deref());
     let temperature = machine::get_temperature(config.deref());
 
@@ -76,7 +79,7 @@ async fn health(data: web::Data<AppData>) -> impl Responder {
 
 #[get("/slots")]
 async fn get_slots(data: web::Data<AppData>) -> impl Responder {
-    let config = data.config.lock().unwrap();
+    let config = data.config.lock().await;
     let slots = machine::get_slots(config.deref());
     let temp = machine::get_temperature(config.deref());
 
